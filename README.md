@@ -1,416 +1,257 @@
-# AI Study Assistant - Full Stack Project
+# AI Study Assistant
 
-A modern full-stack application combining **React** frontend, **FastAPI** backend, and **Google Gemini AI** integration for intelligent studying and note management.
-
-## 🎯 Project Overview
-
-**Frontend:** React app with Tailwind CSS and Framer Motion animations  
-**Backend:** FastAPI with SQLAlchemy ORM and SQLite database  
-**AI:** Google Gemini API for intelligent responses  
-**Features:** Chat, Q&A, Notes Highlighting, Flashcard Generation, Quiz Generator, Summaries, Analytics
+A full-stack intelligent study assistant combining a **React** frontend, **FastAPI** backend, and **Google Gemini AI** for smart studying, note management, and learning analytics.
 
 ---
 
-## ⚠️ Virtual Environment Note
+## 🚀 Tech Stack
 
-There are two venvs in this project:
-- `C:\ai-agent\.venv` — root-level venv (used by startup scripts as primary)
-- `C:\ai-agent\backend\venv` — backend-specific venv (fallback)
-
-**Use `C:\ai-agent\.venv` as the canonical environment.** The startup scripts already prefer it.
-To reinstall dependencies into the correct venv:
-```powershell
-C:\ai-agent\.venv\Scripts\pip.exe install -r backend\requirements.txt
-```
+| Layer     | Technology                                      |
+|-----------|-------------------------------------------------|
+| Frontend  | React 18, Tailwind CSS, Framer Motion           |
+| Backend   | FastAPI, SQLAlchemy ORM, SQLite                 |
+| AI        | Google Gemini API (with HuggingFace fallback)   |
+| Auth      | JWT (python-jose), bcrypt, OAuth2               |
+| Payments  | Stripe + Razorpay integration                   |
 
 ---
 
+## ✨ Features
 
+- 💬 **AI Chat** — Conversational study assistant powered by Gemini
+- ❓ **Q&A** — Ask questions, get instant answers
+- 📝 **Notes Highlighter** — Highlight and extract key points
+- 🃏 **Flashcard Generator** — Auto-generate flashcards from notes
+- 🧠 **Quiz Generator** — Create quizzes with scoring
+- 📄 **Summarizer** — Summarize long texts
+- 📊 **Analytics** — Track study sessions, streaks, and progress
+- 🔐 **Authentication** — Register, login, JWT sessions, password reset
+- 💳 **Premium Billing** — Stripe/Razorpay subscription plans
+- 🎯 **Study Goals & Streaks** — Goal tracking and spaced repetition
+
+---
+
+## 📁 Project Structure
 
 ```
 C:\ai-agent\
-├── frontend/                 # React frontend (port 3000)
+│
+├── frontend/                        # React app (port 3000)
+│   ├── public/
+│   │   └── index.html
 │   ├── src/
+│   │   ├── App.jsx                  # Root component + routing
+│   │   ├── index.js
 │   │   ├── components/
-│   │   │   ├── ChatBot.jsx         # Main chat UI (async, real API)
+│   │   │   ├── ChatBot.jsx          # Main AI chat interface
+│   │   │   ├── QandA.jsx            # Q&A feature
+│   │   │   ├── NotesHighlighter.jsx # Notes highlighting
+│   │   │   ├── FlashcardsContainer.jsx
+│   │   │   ├── QuizGenerator.jsx
+│   │   │   ├── Summary.jsx
+│   │   │   ├── Analytics.jsx
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── UserProfile.jsx
+│   │   │   ├── StudyGoals.jsx
+│   │   │   ├── StreakTracker.jsx
+│   │   │   ├── SpacedRepetition.jsx
+│   │   │   ├── PomodoroTimer.jsx
+│   │   │   ├── AuthModal.jsx        # Login / Register modal
+│   │   │   ├── AuthContext.jsx      # Auth state (React context)
+│   │   │   ├── Login.jsx
+│   │   │   ├── Register.jsx
+│   │   │   ├── ForgotPassword.jsx
+│   │   │   ├── Navbar.jsx
+│   │   │   ├── hooks/
+│   │   │   │   └── useQuota.js
 │   │   │   ├── services/
-│   │   │   │   └── aiService.js    # API client with error handling
-│   │   │   └── ...
-│   │   ├── App.jsx
-│   │   └── index.js
-│   └── package.json
+│   │   │   │   └── aiService.js     # Axios API client
+│   │   │   └── premium/
+│   │   │       └── UpgradeModal.jsx
+│   │   └── __tests__/
+│   │       ├── aiService.test.js
+│   │       └── authService.test.js
+│   ├── package.json
+│   ├── tailwind.config.js
+│   └── .env
 │
-├── backend/                  # FastAPI backend (port 8000)
-│   ├── main.py              # FastAPI app with ~15 endpoints
-│   ├── gemini_client.py     # Gemini AI integration
-│   ├── database.py          # SQLAlchemy ORM models
-│   ├── config.py            # Configuration management
-│   ├── schemas.py           # Pydantic request/response schemas
-│   ├── run_backend.py       # Robust Windows launcher (NEW)
-│   ├── server.py            # Alternative launcher
-│   ├── requirements.txt     # Python dependencies
-│   ├── venv/                # Python virtual environment
-│   ├── .env                 # Environment variables (API keys, etc.)
-│   └── ai_agent.db          # SQLite database
+├── backend/                         # FastAPI app (port 8000)
+│   ├── main.py                      # App entry point + all routes (~15 endpoints)
+│   ├── database.py                  # SQLAlchemy models (7 tables)
+│   ├── schemas.py                   # Pydantic request/response schemas
+│   ├── config.py                    # Environment config
+│   ├── auth.py                      # JWT auth logic
+│   ├── auth_routes.py               # /auth/* endpoints
+│   ├── billing.py                   # Subscription billing logic
+│   ├── billing_routes.py            # /billing/* endpoints
+│   ├── payments.py                  # Stripe/Razorpay integration
+│   ├── gemini_client.py             # Google Gemini AI client
+│   ├── gemini_wrapper.py            # Gemini wrapper with retry logic
+│   ├── ai_wrapper.py                # AI abstraction layer
+│   ├── ai_fallback_wrapper.py       # Fallback to HuggingFace
+│   ├── huggingface_client.py        # HuggingFace inference client
+│   ├── advanced_summarizer.py       # NLP summarization engine
+│   ├── advanced_quiz_generator.py   # Quiz generation engine
+│   ├── advanced_highlighter.py      # Smart highlighting engine
+│   ├── study_analytics_engine.py    # Analytics computation
+│   ├── agent_planner.py             # AI agent planning logic
+│   ├── agent_state.py               # Agent state management
+│   ├── middleware.py                # Rate limiting, logging
+│   ├── https_middleware.py          # HTTPS redirect middleware
+│   ├── job_queue.py                 # Background job queue
+│   ├── backup_db.py                 # Database backup utility
+│   ├── run_backend.py               # Windows startup launcher
+│   ├── migrations/
+│   │   └── 001_premium_billing.sql
+│   ├── requirements.txt
+│   ├── .env                         # API keys & config (not committed)
+│   ├── .env.example                 # Example env template
+│   └── ai_agent.db                  # SQLite database (auto-created)
 │
-├── start-backend.ps1        # PowerShell: Start backend (NEW)
-├── start-frontend.ps1       # PowerShell: Start frontend (NEW)
-├── start.ps1                # PowerShell: Start both servers (NEW)
-└── README.md                # This file
+├── .venv/                           # Python virtual environment (canonical)
+├── .github/
+│   └── workflows/
+│       └── ci.yml                   # GitHub Actions CI
+│
+├── start.ps1                        # Start backend + frontend together
+├── start-backend.ps1                # Start backend only
+├── start-frontend.ps1               # Start frontend only
+├── .gitignore
+└── README.md
 ```
 
 ---
 
-## 🚀 Quick Start (Windows PowerShell)
+## ⚡ Quick Start
 
-### Option 1: Start Everything at Once (Recommended)
+### Prerequisites
+- Python 3.13+
+- Node.js 18+
+- Google Gemini API key
 
-Open PowerShell and run:
+### 1. Start Everything (Recommended)
 
 ```powershell
 cd C:\ai-agent
 .\start.ps1
 ```
 
-This will:
-- Kill any existing processes on ports 8000 (backend) and 3000 (frontend)
-- Start the backend server in a new terminal
-- Start the frontend server in a new terminal
-- Display URLs for access
+This starts both servers in separate terminals.
 
-### Option 2: Start Backend and Frontend Separately
-
-**Terminal 1 - Backend:**
-```powershell
-cd C:\ai-agent
-.\start-backend.ps1
-```
-
-**Terminal 2 - Frontend:**
-```powershell
-cd C:\ai-agent
-.\start-frontend.ps1
-```
-
-### Option 3: Manual Command-Line Start
+### 2. Start Separately
 
 **Backend:**
 ```powershell
-cd C:\ai-agent\backend
-.\venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload=False --log-level info
+.\start-backend.ps1
+# or manually:
+C:\ai-agent\.venv\Scripts\python.exe backend\run_backend.py
 ```
 
 **Frontend:**
 ```powershell
-cd C:\ai-agent\frontend
-npm start
+.\start-frontend.ps1
+# or manually:
+cd frontend && npm start
 ```
 
 ---
 
-## 🌐 Access the Application
+## 🌐 URLs
 
-After starting both servers:
-
-| Service | URL | Purpose |
-|---------|-----|---------|
-| **Frontend** | http://localhost:3000 | React UI (Chat, Q&A, Flashcards, etc.) |
-| **Backend** | http://localhost:8000 | FastAPI server |
-| **API Docs** | http://localhost:8000/docs | Interactive Swagger UI |
-| **Health Check** | http://localhost:8000/health | Backend status |
-
----
-
-## 🔧 Testing the API
-
-### Health Check
-```powershell
-Invoke-RestMethod -Method Get -Uri "http://localhost:8000/health"
-```
-
-Expected response:
-```json
-{
-  "status": "healthy",
-  "timestamp": "2025-11-13T12:34:56.789000",
-  "api_version": "1.0.0"
-}
-```
-
-### Send a Chat Message
-```powershell
-$body = @{
-    message = "What is artificial intelligence?"
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post `
-  -Uri "http://localhost:8000/api/chat" `
-  -Body $body `
-  -ContentType "application/json"
-```
-
-Expected response:
-```json
-{
-  "message": "Artificial intelligence (AI) is...",
-  "session_id": "xyz...",
-  "timestamp": "2025-11-13T12:34:56..."
-}
-```
+| Service       | URL                          |
+|---------------|------------------------------|
+| Frontend      | http://localhost:3000        |
+| Backend API   | http://localhost:8000        |
+| Swagger Docs  | http://localhost:8000/docs   |
+| Health Check  | http://localhost:8000/health |
 
 ---
 
 ## ⚙️ Configuration
 
-### Backend Configuration
-
-Edit `backend/.env` to customize settings:
+Edit `backend/.env`:
 
 ```env
-# Google Gemini API
-GOOGLE_API_KEY=your_key_here
-
-# Database
+GOOGLE_API_KEY=your_gemini_key_here
 DATABASE_URL=sqlite:///./ai_agent.db
-
-# Server
 HOST=0.0.0.0
 PORT=8000
 DEBUG=True
-
-# CORS
 CORS_ORIGINS=http://localhost:3000
+SECRET_KEY=your_jwt_secret
 ```
 
-### Frontend Configuration
-
-The frontend automatically connects to `http://localhost:8000` (or `REACT_APP_API_URL` env var).
-
----
-
-## 🛠️ What We've Done
-
-### ✅ Frontend (Completed)
-- [x] React UI with chat, Q&A, flashcards, quizzes, notes highlighter, summaries, analytics
-- [x] Replaced mock AI responses with real backend API calls
-- [x] Added "New Chat" button to start fresh conversations
-- [x] Proper async/await handling and error messages
-- [x] Tailwind CSS styling with dark mode support
-- [x] Framer Motion animations
-
-### ✅ Backend (Completed)
-- [x] FastAPI with ~15 endpoints
-- [x] SQLAlchemy ORM with 7 database tables
-- [x] Google Gemini AI integration (using correct model: `models/gemini-pro-latest`)
-- [x] CORS configured for frontend
-- [x] Pydantic request/response validation
-- [x] Error handling and logging
-
-### ✅ Stability & Startup (NEW - This Session)
-- [x] Created robust `run_backend.py` launcher for Windows
-- [x] Created PowerShell startup scripts (`start-backend.ps1`, `start-frontend.ps1`, `start.ps1`)
-- [x] Fixed backend startup issues
-- [x] Added comprehensive error handling and logging
-- [x] Added health check endpoint
-
----
-
-## 🐛 Troubleshooting
-
-### Backend won't start
-
-1. **Check if port 8000 is in use:**
-   ```powershell
-   Get-NetTCPConnection -LocalPort 8000 -ErrorAction SilentlyContinue
-   ```
-
-2. **Kill existing Python processes:**
-   ```powershell
-   Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force
-   ```
-
-3. **Check virtual environment:**
-   ```powershell
-   cd C:\ai-agent\backend
-   .\venv\Scripts\python.exe --version
-   ```
-
-4. **Reinstall dependencies:**
-   ```powershell
-   cd C:\ai-agent\backend
-   .\venv\Scripts\pip.exe install -r requirements.txt
-   ```
-
-### Frontend won't connect to backend
-
-1. **Verify backend is running:**
-   ```powershell
-   Invoke-RestMethod -Method Get -Uri "http://localhost:8000/health"
-   ```
-
-2. **Check browser console** (F12) for API errors
-
-3. **Verify CORS settings** in `backend/.env`:
-   ```
-   CORS_ORIGINS=http://localhost:3000
-   ```
-
-4. **Clear browser cache:**
-   - Press `Ctrl+Shift+Delete` in browser
-   - Check "Cookies and other site data"
-   - Click "Clear data"
-
-### Gemini API errors
-
-1. **Verify API key** in `backend/.env` is correct
-
-2. **Check available models:**
-   ```powershell
-   cd C:\ai-agent\backend
-   .\venv\Scripts\python.exe -c "import google.generativeai as genai; genai.configure(api_key='YOUR_KEY'); print([m.name for m in genai.list_models()])"
-   ```
-
-3. **Current working model:** `models/gemini-pro-latest`
-
----
-
-## 📊 API Endpoints
-
-### Chat
-- **POST** `/api/chat` - Send a message and get AI response
-  ```json
-  {
-    "message": "What is machine learning?",
-    "session_id": "optional-session-id"
-  }
-  ```
-
-### Summarization
-- **POST** `/api/summarize` - Generate summary of text
-- **GET** `/api/summaries` - Retrieve saved summaries
-
-### Flashcards
-- **POST** `/api/flashcards/generate` - Generate flashcards from text
-- **GET** `/api/flashcards` - Get all flashcards
-- **POST** `/api/flashcards` - Create flashcard
-
-### Quiz
-- **POST** `/api/quiz/generate` - Generate quiz from text
-- **GET** `/api/quizzes` - Get all quizzes
-
-### Notes
-- **POST** `/api/notes/highlight` - Highlight important parts of notes
-
-### Analytics
-- **GET** `/api/analytics` - Get user analytics
-
-### Health
-- **GET** `/health` - Server health check
-
----
-
-## 📝 Development Tips
-
-### Viewing Backend Logs
-
-The backend launcher (`run_backend.py`) logs all activity. Check the terminal where the backend is running.
-
-### Hot Reload (Frontend)
-
-The React frontend automatically reloads when you edit files. Just save and refresh the browser.
-
-### Backend Manual Restart
-
-If you need to restart the backend manually:
-```powershell
-Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force
-# Then start it again
+Edit `frontend/.env`:
+```env
+REACT_APP_API_URL=http://localhost:8000
 ```
 
-### Database Reset
+---
 
-To reset the SQLite database:
+## 📡 Key API Endpoints
+
+| Method | Endpoint                  | Description                  |
+|--------|---------------------------|------------------------------|
+| GET    | `/health`                 | Health check                 |
+| POST   | `/api/chat`               | AI chat message              |
+| POST   | `/api/summarize`          | Summarize text               |
+| POST   | `/api/flashcards/generate`| Generate flashcards          |
+| POST   | `/api/quiz/generate`      | Generate quiz                |
+| POST   | `/api/notes/highlight`    | Highlight key points         |
+| GET    | `/api/analytics`          | User analytics               |
+| POST   | `/auth/register`          | Register user                |
+| POST   | `/auth/login`             | Login + get JWT token        |
+| GET    | `/auth/me`                | Get current user             |
+
+---
+
+## 🗄️ Database Schema
+
+7 SQLAlchemy models:
+- `User` — accounts, auth, subscription tier
+- `ChatSession` / `ChatMessage` — conversation history
+- `Flashcard` — generated flashcards
+- `Quiz` / `QuizAttempt` — quizzes and scores
+- `Summary` — saved summaries
+- `StudySession` — analytics data
+
+---
+
+## 🔐 Virtual Environment
+
+Two venvs exist — always use the root one:
+
 ```powershell
-cd C:\ai-agent\backend
-Remove-Item ai_agent.db -ErrorAction SilentlyContinue
-# Database will be recreated on next backend start
+# Install dependencies
+C:\ai-agent\.venv\Scripts\pip.exe install -r backend\requirements.txt
 ```
 
 ---
 
 ## 📦 Dependencies
 
-### Frontend
-- React 18+
-- Tailwind CSS
-- Framer Motion
-- Axios / Fetch API
-
-### Backend
-- FastAPI 0.104.1
-- Uvicorn 0.24.0
-- SQLAlchemy 2.0.23
+**Backend** (`backend/requirements.txt`):
+- FastAPI 0.104.1, Uvicorn 0.24.0
+- SQLAlchemy 2.0.23, Alembic
 - Google Generative AI 0.3.2
-- Python 3.13+
+- python-jose, bcrypt, passlib
+- Stripe, Razorpay, SlowAPI
 
-See `frontend/package.json` and `backend/requirements.txt` for full lists.
-
----
-
-## 🔐 Security Notes
-
-- **API Keys:** Never commit `.env` to version control
-- **CORS:** Currently allows `http://localhost:3000` only (development)
-- **Database:** SQLite is for development; use PostgreSQL for production
-- **Authentication:** Optional (add JWT/sessions as needed)
+**Frontend** (`frontend/package.json`):
+- React 18, React Router
+- Tailwind CSS, Framer Motion
+- Axios
 
 ---
 
-## 🚢 Production Deployment
+## 🚢 Production Notes
 
-For production deployment:
-
-1. **Backend:**
-   - Use PostgreSQL instead of SQLite
-   - Run with Gunicorn: `gunicorn -w 4 main:app`
-   - Set `DEBUG=False` in `.env`
-   - Use HTTPS and proper CORS settings
-
-2. **Frontend:**
-   - Build: `npm run build`
-   - Serve static files from backend or Nginx
-   - Set `REACT_APP_API_URL` to production backend URL
-
-3. **Database:**
-   - Migrate to PostgreSQL or cloud database
-   - Set up automated backups
-   - Configure connection pooling
+- Replace SQLite with PostgreSQL
+- Set `DEBUG=False` in `.env`
+- Run backend with Gunicorn: `gunicorn -w 4 main:app`
+- Build frontend: `npm run build`
+- Use HTTPS and restrict CORS origins
 
 ---
 
-## 📞 Support
-
-If you encounter issues:
-
-1. Check the troubleshooting section above
-2. Review backend logs (terminal output)
-3. Check browser console (F12)
-4. Verify all environment variables in `.env`
-5. Ensure ports 3000 and 8000 are available
-
----
-
-## 📄 License
-
-[Your License Here]
-
----
-
-## 👨‍💻 Authors
-
-AI Study Assistant Development Team
-
----
-
-**Last Updated:** November 13, 2025  
-**Status:** ✅ Full Stack Ready for Testing
+*AI Study Assistant — Built with FastAPI + React + Google Gemini*
