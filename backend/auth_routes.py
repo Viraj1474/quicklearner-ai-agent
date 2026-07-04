@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import logging
 
-from database import get_db, User, UserRole, OAuthProvider
+from database import get_db, User, UserRole, OAuthProvider, LoginAttempt
 from schemas import (
     UserRegister, UserLoginRequest, TokenResponse, RefreshTokenRequest,
     UserProfileResponse, UserProfileUpdate, ChangePasswordRequest,
@@ -42,8 +42,6 @@ logger = logging.getLogger(__name__)
 # Create router
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
 
-# Lightweight brute-force protection for credential login
-failed_login_attempts = {}
 MAX_FAILED_ATTEMPTS = 6
 LOCKOUT_MINUTES = 10
 
@@ -52,27 +50,45 @@ def _auth_attempt_key(email: str, request: Request) -> str:
     return f"{email.lower()}::{request.client.host if request.client else 'unknown'}"
 
 
-def _is_locked(key: str) -> bool:
-    state = failed_login_attempts.get(key)
-    if not state:
+def _get_login_attempt_row(db: Session, key: str) -> LoginAttempt:
+    row = db.query(LoginAttempt).filter(LoginAttempt.attempt_key == key).first()
+    if row is None:
+        row = LoginAttempt(attempt_key=key, attempts=0)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    return row
+
+
+def _is_locked(db: Session, key: str) -> bool:
+    row = db.query(LoginAttempt).filter(LoginAttempt.attempt_key == key).first()
+    if not row or not row.lock_until:
         return False
-    if state.get("locked_until") and state["locked_until"] > datetime.utcnow():
+
+    if row.lock_until > datetime.utcnow():
         return True
+
+    row.attempts = 0
+    row.lock_until = None
+    db.commit()
     return False
 
 
-def _record_failed_attempt(key: str) -> None:
-    state = failed_login_attempts.get(key, {"count": 0, "locked_until": None})
-    state["count"] += 1
-    if state["count"] >= MAX_FAILED_ATTEMPTS:
-        state["locked_until"] = datetime.utcnow() + timedelta(minutes=LOCKOUT_MINUTES)
-        state["count"] = 0
-    failed_login_attempts[key] = state
+def _record_failed_attempt(db: Session, key: str) -> None:
+    row = _get_login_attempt_row(db, key)
+    row.attempts += 1
+    row.last_attempt_time = datetime.utcnow()
+    if row.attempts >= MAX_FAILED_ATTEMPTS:
+        row.lock_until = datetime.utcnow() + timedelta(minutes=LOCKOUT_MINUTES)
+        row.attempts = MAX_FAILED_ATTEMPTS
+    db.commit()
 
 
-def _record_success_attempt(key: str) -> None:
-    if key in failed_login_attempts:
-        del failed_login_attempts[key]
+def _record_success_attempt(db: Session, key: str) -> None:
+    row = db.query(LoginAttempt).filter(LoginAttempt.attempt_key == key).first()
+    if row:
+        db.delete(row)
+        db.commit()
 
 
 # ===== GOOGLE OAUTH STATUS =====
@@ -84,7 +100,9 @@ async def google_oauth_enabled():
     Returns { "enabled": true/false }
     """
     from config import settings
-    enabled = bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET)
+    # Google Sign-In (GIS) in this app uses an ID token from the frontend,
+    # so a client ID is sufficient for the backend to validate the audience.
+    enabled = bool(settings.GOOGLE_CLIENT_ID)
     return {"enabled": enabled}
 
 
@@ -176,7 +194,7 @@ async def login(
     """
     # Find user by email
     attempt_key = _auth_attempt_key(login_data.email, request)
-    if _is_locked(attempt_key):
+    if _is_locked(db, attempt_key):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed login attempts. Please try again later."
@@ -185,7 +203,7 @@ async def login(
     user = get_user_by_email(db, login_data.email)
     
     if not user:
-        _record_failed_attempt(attempt_key)
+        _record_failed_attempt(db, attempt_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
@@ -193,6 +211,7 @@ async def login(
     
     # Check if user has a password (might be OAuth-only user)
     if not user.hashed_password:
+        _record_failed_attempt(db, attempt_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="This account uses Google login. Please sign in with Google."
@@ -200,7 +219,7 @@ async def login(
     
     # Verify password
     if not verify_password(login_data.password, user.hashed_password):
-        _record_failed_attempt(attempt_key)
+        _record_failed_attempt(db, attempt_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
@@ -208,6 +227,7 @@ async def login(
     
     # Check if user is active
     if not user.is_active:
+        _record_failed_attempt(db, attempt_key)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is deactivated. Please contact support."
@@ -218,7 +238,7 @@ async def login(
         db.commit()
     
     # Update last login
-    _record_success_attempt(attempt_key)
+    _record_success_attempt(db, attempt_key)
     user.last_login = datetime.utcnow()
     db.commit()
     

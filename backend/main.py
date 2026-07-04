@@ -25,14 +25,17 @@ Version: 2.0.0 (Agent Architecture)
 """
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
+import asyncio
+import json
 import logging
 import traceback
 import psutil  # For system metrics
+import os
 
 from config import settings, setup_logging
 
@@ -69,7 +72,7 @@ from job_queue import job_queue
 # === AUTHENTICATION ===
 from auth_routes import router as auth_router
 from billing_routes import router as billing_router
-from auth import get_current_user, get_current_user_optional, require_role, require_premium
+from auth import get_current_user, get_current_user_optional, require_role, require_premium, require_premium_or_quota
 
 # === AGENT COMPONENTS ===
 # These implement the AI Agent architecture with memory and planning
@@ -90,6 +93,15 @@ logger = logging.getLogger(__name__)
 # Singleton that manages session-based agent states with memory
 # Each session has its own AgentState with short-term and long-term memory
 agent_manager = AgentStateManager()
+
+
+def _stream_sse_event(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+
+
+def _chunk_text(text: str, chunk_size: int = 64):
+    for start in range(0, len(text), chunk_size):
+        yield text[start:start + chunk_size]
 
 
 def validate_non_empty_text(text: Optional[str], field_name: str) -> None:
@@ -143,18 +155,34 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 70)
 
 # Initialize FastAPI app with lifespan
+# In production, disable debug mode to prevent information leakage
 app = FastAPI(
     title="AI Study Assistant API",
     description="AI Agent backend with memory, planning, and tool routing for study assistance",
     version="2.0.0",
-    debug=settings.DEBUG,
-    lifespan=lifespan
+    debug=(settings.DEBUG and settings.ENVIRONMENT != "production"),  # Never debug in production
+    lifespan=lifespan,
+    docs_url=None if settings.ENVIRONMENT == "production" else "/docs",  # Disable /docs in production
+    redoc_url=None if settings.ENVIRONMENT == "production" else "/redoc",  # Disable /redoc in production
+    openapi_url=None if settings.ENVIRONMENT == "production" else "/openapi.json"  # Disable OpenAPI schema in production
 )
 
-# Configure CORS
+# ===== CORS CONFIGURATION =====
+# In development: Allow localhost on multiple ports
+# In production: Only allow specific domain(s) via environment variable
+if settings.ENVIRONMENT == "production":
+    # Production: Restrict to explicitly configured origin(s)
+    cors_origins = os.getenv("ALLOWED_ORIGIN", "https://yourdomain.com").split(",")
+    if not cors_origins or cors_origins == ["https://yourdomain.com"]:
+        # Warn if using default
+        logger.warning("⚠️  CORS is using default domain. Set ALLOWED_ORIGIN environment variable for production.")
+else:
+    # Development: Allow common local ports
+    cors_origins = settings.CORS_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -251,6 +279,17 @@ async def health_check():
         "service": "backend"
     }
 
+# === Quota Status Endpoint ===
+@app.get("/api/quota/status", tags=["Quota"])
+async def quota_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Return per-feature quota status for the current user."""
+    from billing import get_quota_info
+    return get_quota_info(db, current_user)
+
+
 # === Admin Endpoints ===
 @app.post("/api/admin/clear-cache", tags=["Admin"])
 async def admin_clear_cache(admin_user: User = Depends(require_role([UserRole.ADMIN.value]))):
@@ -258,6 +297,47 @@ async def admin_clear_cache(admin_user: User = Depends(require_role([UserRole.AD
     clear_cache()
     logger.info(f"Response cache cleared by admin request: user_id={admin_user.id}")
     return {"message": "Cache cleared successfully", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.post("/api/admin/reset-ai-health", tags=["Admin"])
+async def admin_reset_ai_health(admin_user: User = Depends(require_role([UserRole.ADMIN.value]))):
+    """Reset AI provider health tracker (clear failures and open circuits).
+
+    Admin-only endpoint to immediately clear circuit-breaker state for both
+    AI providers (`gemini` and `huggingface`). Useful for emergency recovery
+    when providers are temporarily marked unavailable.
+    """
+    try:
+        # Use the health tracker methods to mark providers as healthy
+        ai_fallback_wrapper._health_tracker.record_success("gemini")
+        ai_fallback_wrapper._health_tracker.record_success("huggingface")
+        logger.warning(f"AI health reset via admin by user_id={admin_user.id}")
+        return {"message": "AI provider health reset. Circuits closed.", "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        logger.exception("Failed to reset AI health tracker")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Development helper: reset AI health without authentication when in development
+@app.post("/api/dev/reset-ai-health", tags=["Dev"])
+async def dev_reset_ai_health():
+    """Development-only endpoint to reset AI provider health tracker.
+
+    This endpoint is intentionally unauthenticated and is only enabled when
+    `ENVIRONMENT` is `development`. It is useful for local debugging and
+    should never be exposed in production.
+    """
+    if settings.ENVIRONMENT != "development":
+        raise HTTPException(status_code=403, detail="Dev reset is disabled in non-development environments")
+
+    try:
+        ai_fallback_wrapper._health_tracker.record_success("gemini")
+        ai_fallback_wrapper._health_tracker.record_success("huggingface")
+        logger.warning("AI health reset via /api/dev/reset-ai-health (development only)")
+        return {"message": "AI provider health reset (development). Circuits closed.", "timestamp": datetime.utcnow().isoformat()}
+    except Exception as e:
+        logger.exception("Failed to reset AI health tracker (dev)")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/stats", tags=["Stats"])
 async def get_stats():
@@ -308,162 +388,178 @@ async def get_provider_status():
     }
 
 # === Chat Endpoints ===
-@app.post("/api/chat", response_model=ChatResponse, tags=["Chat"])
+@app.post("/api/chat", tags=["Chat"])
 @limiter.limit(CHAT_RATE_LIMIT)
 async def chat(
     request: Request,
-    chat_request: ChatRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_premium())
+    current_user: User = Depends(require_premium_or_quota("chat"))
 ):
-    """
-    AI Agent Chat Endpoint - Full Agent Loop
-    
-    This endpoint implements the complete AI Agent architecture:
-    
-    1. STATE RETRIEVAL: Load or create agent state for this session
-    2. INTENT ANALYSIS: Planner analyzes input to determine action
-    3. CONTEXT BUILDING: Combine short-term and long-term memory
-    4. TOOL EXECUTION: Route to appropriate Gemini API call
-    5. MEMORY UPDATE: Store interaction in agent memory
-    6. REFLECTION: Log agent's self-assessment of response quality
-    
-    IMPORTANT: The Gemini API is NOT trained by this process. Memory is
-    context prepended to prompts - the underlying model is unchanged.
-    
-    Rate Limited: 30 requests per minute per client IP.
-    """
+    """AI Agent Chat Endpoint — accepts JSON or multipart/form-data with files."""
     user_id = current_user.id
 
-    logger.info(
-        "[/api/chat] Incoming request: user_id=%s session_id=%s message_length=%s",
-        user_id,
-        chat_request.session_id,
-        len(chat_request.message or "")
-    )
-    
-    # Input validation
-    if not chat_request.message or len(chat_request.message.strip()) == 0:
-        logger.warning(f"Empty message received from user {user_id}")
-        raise HTTPException(
-            status_code=400,
-            detail="Message cannot be empty"
-        )
-    
-    if len(chat_request.message) > settings.MAX_CHAT_MESSAGE_LENGTH:
-        logger.warning(
-            f"Message too long from user {user_id}: {len(chat_request.message)} > {settings.MAX_CHAT_MESSAGE_LENGTH}"
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=f"Message exceeds maximum length of {settings.MAX_CHAT_MESSAGE_LENGTH} characters"
-        )
-    
+    # Parse incoming payload: support JSON or multipart/form-data
+    content_type = request.headers.get('content-type', '')
+    chat_message = ''
+    session_id = None
+    attachments = []
+
+    try:
+        if content_type.startswith('multipart/'):
+            form = await request.form()
+            chat_message = (form.get('message') or '').strip()
+            session_id = form.get('session_id')
+            # collect UploadFile objects
+            for k, v in form.items():
+                if hasattr(v, 'filename') and v.filename:
+                    attachments.append(v)
+        else:
+            body = await request.json()
+            chat_message = (body.get('message') or '').strip()
+            session_id = body.get('session_id')
+    except Exception:
+        logger.exception("Failed to parse chat request body")
+        raise HTTPException(status_code=400, detail="Invalid request body")
+
+    logger.info("[/api/chat] Incoming request: user_id=%s session_id=%s message_length=%s attachments=%s",
+                user_id, session_id, len(chat_message or ""), len(attachments))
+
+    # Basic validation
+    validate_non_empty_text(chat_message, "Message")
+    validate_max_length(chat_message, settings.MAX_CHAT_MESSAGE_LENGTH,
+                        f"Message exceeds maximum length of {settings.MAX_CHAT_MESSAGE_LENGTH} characters")
+
     try:
         # === STEP 1: SESSION & STATE MANAGEMENT ===
-        if chat_request.session_id:
-            session = db.query(ChatSession).filter(
-                ChatSession.id == chat_request.session_id,
-                ChatSession.user_id == user_id
-            ).first()
-            if not session:
-                logger.warning(f"Session {chat_request.session_id} not found for user {user_id}")
+        session = None
+        if session_id:
+            try:
+                sid_int = int(session_id)
+            except Exception:
+                sid_int = None
+            if sid_int:
+                session = db.query(ChatSession).filter(
+                    ChatSession.id == sid_int,
+                    ChatSession.user_id == user_id
+                ).first()
+            if not session and sid_int:
                 raise HTTPException(status_code=404, detail="Session not found")
-        else:
-            session = ChatSession(user_id=user_id, title=chat_request.message[:50])
+
+        if not session:
+            session = ChatSession(user_id=user_id, title=(chat_message or '')[:50])
             db.add(session)
             db.commit()
             db.refresh(session)
             logger.info(f"Created new chat session {session.id} for user {user_id}")
-        
-        # Get or create agent state for this session
+
+        # Get or create agent state
         session_key = f"session_{session.id}"
         agent_state = agent_manager.get_state(session_key)
-        
-        # Set agent goal based on session context
         if not agent_state.goal:
             agent_state.goal = f"Help user with their study needs. Session: {session.title}"
-        
-        # === STEP 2: INTENT ANALYSIS (PLANNER) ===
-        # Deterministic analysis of user intent - NOT machine learning
-        planner_result = analyze_intent(
-            user_input=chat_request.message,
-            context=agent_state.build_context_prompt()
-        )
-        
-        logger.info(
-            f"[Agent] Intent: {planner_result.action.value}, "
-            f"Confidence: {planner_result.confidence:.2f}, "
-            f"Reasoning: {planner_result.reasoning}"
-        )
-        
-        # Log execution plan for debugging
-        exec_plan = create_execution_plan(planner_result)
-        logger.debug(f"[Agent] Execution plan: {exec_plan}")
-        
-        # === STEP 3: BUILD CONTEXT FROM MEMORY ===
-        # Load conversation history from database
-        messages = db.query(ChatMessage).filter(
-            ChatMessage.session_id == session.id
-        ).order_by(ChatMessage.timestamp).all()
-        
+
+        # === STEP 2: INTENT ANALYSIS ===
+        planner_result = analyze_intent(user_input=chat_message, context=agent_state.build_context_prompt())
+        logger.info(f"[Agent] Intent: {planner_result.action.value} Confidence: {planner_result.confidence:.2f}")
+
+        # === STEP 3: BUILD CONTEXT & STORE USER MESSAGE ===
+        messages = db.query(ChatMessage).filter(ChatMessage.session_id == session.id).order_by(ChatMessage.timestamp).all()
         history = [{"sender": msg.sender, "content": msg.content} for msg in messages]
-        
-        # Build enhanced context with agent memory
         context_prompt = agent_state.build_context_prompt()
-        
-        # Store user message in database
-        user_msg = ChatMessage(
-            session_id=session.id,
-            content=chat_request.message,
-            sender="user"
-        )
+
+        # Optionally extract text from attachments and append to message context
+        attachment_texts = []
+        for up in attachments:
+            try:
+                content_type = getattr(up, 'content_type', '') or ''
+                if content_type.startswith('text/'):
+                    data = await up.read()
+                    text = data.decode('utf-8', errors='replace')
+                    attachment_texts.append(f"== Attachment: {up.filename} ==\n{text}")
+                elif up.filename.lower().endswith('.pdf'):
+                    try:
+                        try:
+                            import importlib
+                            PyPDF2 = importlib.import_module('PyPDF2')
+                            PdfReader = getattr(PyPDF2, 'PdfReader', None)
+                        except Exception:
+                            PdfReader = None
+                        if PdfReader:
+                            stream = up.file
+                            stream.seek(0)
+                            reader = PdfReader(stream)
+                            pages_text = []
+                            for p in reader.pages:
+                                pages_text.append(p.extract_text() or '')
+                            attachment_texts.append(f"== Attachment: {up.filename} (pdf) ==\n" + "\n".join(pages_text))
+                        else:
+                            logger.warning("PyPDF2 not available; skipping PDF extraction")
+                            attachment_texts.append(f"== Attachment: {up.filename} (pdf - not parsed) ==")
+                    except Exception:
+                        logger.exception(f"PDF text extraction failed for {up.filename}")
+                else:
+                    # skip binary attachments for now
+                    attachment_texts.append(f"== Attachment: {up.filename} (binary file - not parsed) ==")
+            except Exception:
+                logger.exception(f"Failed to read attachment {getattr(up, 'filename', 'unknown')}")
+
+        # store user message in DB
+        combined_message = chat_message
+        if attachment_texts:
+            combined_message = combined_message + '\n\n' + '\n\n'.join(attachment_texts)
+
+        user_msg = ChatMessage(session_id=session.id, content=combined_message, sender='user')
         db.add(user_msg)
         db.commit()
-        
-        # Add to agent's short-term memory
-        agent_state.add_message("user", chat_request.message)
-        
-        # === STEP 4: TOOL EXECUTION (ROUTE BASED ON INTENT) ===
-        # The planner determines which tool to use, then we execute it
-        logger.info(f"[Agent] Executing action: {planner_result.action.value}")
-        
-        # Get action-specific prompt prefix
+        agent_state.add_message('user', combined_message)
+
+        # === STEP 4: TOOL EXECUTION ===
         system_prefix = get_action_prompt_prefix(planner_result.action)
-        
-        # Enhance the message with context and system guidance
-        enhanced_message = f"{context_prompt}\n\n{system_prefix}\n\nUser: {chat_request.message}"
-        
-        # Execute via AI API with automatic fallback (Gemini or Hugging Face based on config)
+        enhanced_message = f"{context_prompt}\n\n{system_prefix}\n\nUser: {combined_message}"
         ai_response = await ai_fallback_wrapper.chat(enhanced_message, history)
-        
+
         # === STEP 5: UPDATE AGENT MEMORY ===
-        # Add AI response to short-term memory
-        agent_state.add_message("assistant", ai_response)
-        
-        # Update last action
+        agent_state.add_message('assistant', ai_response)
         agent_state.last_action = planner_result.action.value
-        
-        # Check if we should summarize for long-term memory
+
         if agent_state.should_summarize():
             try:
-                messages_text = "\n".join(
-                    f"{m['sender'].upper()}: {m['content']}"
-                    for m in agent_state.short_term_memory
-                )
+                messages_text = "\n".join(f"{m['sender'].upper()}: {m['content']}" for m in agent_state.short_term_memory)
                 summary = await ai_fallback_wrapper.summarize(messages_text)
                 agent_state.update_long_term_memory(summary)
                 agent_state.short_term_memory = agent_state.short_term_memory[-2:]
                 logger.info(f"[Agent] Memory summarized for session {session_key}")
-            except Exception as sum_err:
-                logger.warning(f"[Agent] Memory summarization failed: {sum_err}")
-        
-        # Store AI message in database
-        ai_msg = ChatMessage(
-            session_id=session.id,
-            content=ai_response,
-            sender="ai"
-        )
+            except Exception:
+                logger.exception("Memory summarization failed")
+
+        # store AI message
+        ai_msg = ChatMessage(session_id=session.id, content=ai_response, sender='ai')
+        db.add(ai_msg)
+        session.updated_at = datetime.utcnow()
+        db.commit()
+
+        # Track usage (increments daily quota)
+        from billing import increment_usage
+        increment_usage(db, current_user.id, 'chat')
+        logger.info(f"[Quota] User {current_user.id} consumed 1 chat usage")
+
+        async def event_stream():
+            yield _stream_sse_event('meta', {'session_id': session.id, 'timestamp': datetime.utcnow().isoformat()})
+            for chunk in _chunk_text(ai_response):
+                yield _stream_sse_event('chunk', {'content': chunk})
+                await asyncio.sleep(0.01)
+            yield _stream_sse_event('done', {'message': ai_response, 'session_id': session.id, 'timestamp': datetime.utcnow().isoformat()})
+
+        return StreamingResponse(event_stream(), media_type='text/event-stream')
+    except GeminiAPIError as e:
+        logger.error(f"✗ Gemini API error in chat: {e.error_type} - {e.message}")
+        raise HTTPException(status_code=503 if 'timeout' in e.error_type or 'network' in e.error_type else 500, detail=e.message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Unexpected error in chat endpoint")
+        detail_msg = str(e) if settings.DEBUG else 'An unexpected error occurred. Please try again.'
+        raise HTTPException(status_code=500, detail=detail_msg)
         db.add(ai_msg)
         session.updated_at = datetime.utcnow()
         db.commit()
@@ -476,11 +572,21 @@ async def chat(
             f"Memory size: {len(agent_state.short_term_memory)} messages"
         )
         
-        return ChatResponse(
-            message=ai_response,
-            session_id=session.id,
-            timestamp=datetime.utcnow()
-        )
+        async def event_stream():
+            yield _stream_sse_event("meta", {
+                "session_id": session.id,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+            for chunk in _chunk_text(ai_response):
+                yield _stream_sse_event("chunk", {"content": chunk})
+                await asyncio.sleep(0.01)
+            yield _stream_sse_event("done", {
+                "message": ai_response,
+                "session_id": session.id,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
         
     except GeminiAPIError as e:
         logger.error(f"✗ Gemini API error in chat: {e.error_type} - {e.message}")
@@ -505,7 +611,7 @@ async def summarize_text(
     request: Request,
     summary_request: SummaryRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_premium())
+    current_user: User = Depends(require_premium_or_quota("summarize"))
 ):
     """
     Generate a summary of the provided text
@@ -549,6 +655,10 @@ async def summarize_text(
         db.refresh(summary)
         
         logger.info(f"✓ Summarization complete: {len(summary_text)} chars output")
+        
+        # Track usage
+        from billing import increment_usage
+        increment_usage(db, current_user.id, 'summarize')
         
         return SummaryResponse(
             id=summary.id,
@@ -721,7 +831,13 @@ async def get_job_status(job_id: str, current_user: User = Depends(get_current_u
 
 # === Notes Highlighting Endpoints ===
 @app.post("/api/notes/highlight", response_model=NotesHighlightResponse, tags=["Notes"])
-async def highlight_notes(request: NotesHighlightRequest, current_user: User = Depends(require_premium())):
+@limiter.limit(AI_RATE_LIMIT)
+async def highlight_notes(
+    request: Request,
+    highlight_request: NotesHighlightRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_premium_or_quota("highlight"))
+):
     """
     Analyze notes and highlight important concepts
     
@@ -733,9 +849,9 @@ async def highlight_notes(request: NotesHighlightRequest, current_user: User = D
     
     # Input validation
     try:
-        validate_non_empty_text(request.text, "Notes text")
+        validate_non_empty_text(highlight_request.text, "Notes text")
         validate_max_length(
-            request.text,
+            highlight_request.text,
             settings.MAX_TEXT_INPUT_LENGTH,
             f"Notes exceed maximum length of {settings.MAX_TEXT_INPUT_LENGTH} characters"
         )
@@ -744,11 +860,15 @@ async def highlight_notes(request: NotesHighlightRequest, current_user: User = D
         raise
     
     try:
-        logger.info(f"Starting notes highlighting: {len(request.text)} chars")
+        logger.info(f"Starting notes highlighting: {len(highlight_request.text)} chars")
         
-        result = await ai_fallback_wrapper.highlight_notes(request.text)
+        result = await ai_fallback_wrapper.highlight_notes(highlight_request.text)
         
         logger.info(f"✓ Notes highlighting complete: {len(result.get('key_concepts', []))} concepts found")
+        
+        # Track usage
+        from billing import increment_usage
+        increment_usage(db, current_user.id, 'highlight')
         
         return NotesHighlightResponse(**result)
     
@@ -832,7 +952,7 @@ async def generate_quiz(
     request: Request,
     quiz_request: QuizRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_premium())
+    current_user: User = Depends(require_premium_or_quota("quiz"))
 ):
     """
     Generate a quiz based on topic or study material
@@ -894,6 +1014,10 @@ async def generate_quiz(
         db.refresh(quiz)
         
         logger.info(f"✓ Quiz generated: {len(questions)} questions created")
+        
+        # Track usage
+        from billing import increment_usage
+        increment_usage(db, user_id, 'quiz')
         
         return QuizResponse(
             id=quiz.id,
@@ -993,7 +1117,7 @@ async def generate_flashcards(
     request: Request,
     flashcard_request: FlashcardGenerateRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_premium())
+    current_user: User = Depends(require_premium_or_quota("flashcards"))
 ):
     """
     Generate flashcards automatically from study material
@@ -1044,6 +1168,10 @@ async def generate_flashcards(
         db.commit()
         
         logger.info(f"✓ Flashcards generated: {len(flashcards)} cards created")
+        
+        # Track usage
+        from billing import increment_usage
+        increment_usage(db, user_id, 'flashcards')
         
         return [
             FlashcardResponse(
@@ -1279,11 +1407,46 @@ async def get_analytics_insights(db: Session = Depends(get_db), current_user: Us
 @limiter.limit(AI_RATE_LIMIT)
 async def generate_advanced_quiz(
     request: Request,
-    quiz_request: AdvancedQuizRequest,
     current_user: User = Depends(require_premium())
 ):
-    """Advanced quiz generation with multiple question types"""
+    """Advanced quiz generation with multiple question types.
+
+    This endpoint intentionally accepts either snake_case or camelCase JSON
+    keys so older frontend builds and ad hoc API clients continue to work.
+    """
     try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+        normalized_payload = {
+            "topic": payload.get("topic") or payload.get("subject") or payload.get("prompt"),
+            "num_questions": payload.get("num_questions", payload.get("numQuestions", 10)),
+            "difficulty": payload.get("difficulty", "medium"),
+            "question_types": payload.get("question_types", payload.get("questionTypes")),
+            "with_hints": payload.get("with_hints", payload.get("withHints", True)),
+            "with_explanations": payload.get("with_explanations", payload.get("withExplanations", True)),
+            "with_takeaways": payload.get("with_takeaways", payload.get("withTakeaways", False)),
+            "adaptive_difficulty": payload.get("adaptive_difficulty", payload.get("adaptiveDifficulty", True)),
+            "bloom_level": payload.get("bloom_level", payload.get("bloomLevel")),
+            "time_limit_minutes": payload.get("time_limit_minutes", payload.get("timeLimitMinutes")),
+            "shuffle_questions": payload.get("shuffle_questions", payload.get("shuffleQuestions", True)),
+            "shuffle_options": payload.get("shuffle_options", payload.get("shuffleOptions", True)),
+        }
+
+        try:
+            quiz_request = AdvancedQuizRequest.model_validate(normalized_payload)
+        except Exception as validation_error:
+            logger.warning(
+                "Advanced quiz validation failed: payload_keys=%s error=%s",
+                sorted(list(payload.keys())),
+                validation_error,
+            )
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid quiz request. Required field: topic. Accepted keys: topic/subject/prompt, num_questions/numQuestions, question_types/questionTypes, with_hints/withHints, with_explanations/withExplanations, with_takeaways/withTakeaways, adaptive_difficulty/adaptiveDifficulty, bloom_level/bloomLevel, time_limit_minutes/timeLimitMinutes, shuffle_questions/shuffleQuestions, shuffle_options/shuffleOptions."
+            )
+
         validate_non_empty_text(quiz_request.topic, "Topic")
         validate_max_length(
             quiz_request.topic,
@@ -1347,6 +1510,55 @@ async def get_dashboard_analytics(
     except Exception as e:
         logger.error(f"✗ Error getting dashboard analytics: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="An unexpected error occurred during analytics retrieval.")
+
+
+@app.get("/api/analytics", tags=["Advanced Analytics"])
+async def get_analytics_records(
+    limit: int = 50,
+    offset: int = 0,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get paginated analytics records for the current user."""
+    try:
+        user_id = current_user.id
+        query = db.query(Analytics).filter(Analytics.user_id == user_id)
+
+        if start_date:
+            query = query.filter(Analytics.date >= start_date)
+        if end_date:
+            query = query.filter(Analytics.date <= end_date)
+
+        total = query.count()
+        rows = query.order_by(Analytics.date.desc()).offset(offset).limit(limit).all()
+
+        items = [
+            {
+                "id": row.id,
+                "user_id": row.user_id,
+                "date": row.date,
+                "study_time_minutes": row.study_time_minutes,
+                "questions_answered": row.questions_answered,
+                "quizzes_completed": row.quizzes_completed,
+                "flashcards_reviewed": row.flashcards_reviewed,
+                "summaries_generated": row.summaries_generated,
+            }
+            for row in rows
+        ]
+
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+    except Exception as e:
+        logger.error(f"✗ Error getting analytics records: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An unexpected error occurred while loading analytics.")
 
 
 @app.get("/api/analytics/performance", response_model=AnalyticsPerformanceResponse, tags=["Advanced Analytics"])

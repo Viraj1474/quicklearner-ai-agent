@@ -1,0 +1,22 @@
+flowchart TD
+    A([Start]) --> B[User opens app]
+    B --> C[Login / Signup]
+    C --> D{Authenticated?}
+    D -- No --> E[Show auth error]
+    D -- Yes --> F[User enters chat prompt]
+    F --> G{Premium access?}
+    G -- No --> H[Check free quota]
+    H --> I{Quota available?}
+    I -- No --> J[Return 403 / upgrade prompt]
+    I -- Yes --> K[Send request to AI service]
+    G -- Yes --> K[Send request to AI service]
+    K --> L{Gemini available?}
+    L -- Yes --> M[Return Gemini response]
+    L -- No --> N[Try Hugging Face fallback]
+    N --> O{Fallback available?}
+    O -- Yes --> P[Return fallback response]
+    O -- No --> Q[Return error message]
+    M --> R[Save chat to database]
+    P --> R
+    R --> S[Show response to user]
+    S --> T([End])

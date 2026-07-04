@@ -1,0 +1,36 @@
+sequenceDiagram
+    participant U as User
+    participant F as Frontend
+    participant B as Backend API
+    participant A as Auth Service
+    participant AI as AI Fallback Wrapper
+    participant G as Gemini
+    participant H as Hugging Face
+    participant DB as SQLite DB
+
+    U->>F: Enter chat prompt
+    F->>A: Verify token/session
+    A-->>F: Auth success
+
+    F->>B: POST /api/chat
+    B->>DB: Load session/user data
+    DB-->>B: Session info
+
+    B->>AI: Generate response
+    AI->>G: Try Gemini
+    alt Gemini success
+        G-->>AI: Response
+    else Gemini fails
+        AI->>H: Try Hugging Face fallback
+        alt Fallback success
+            H-->>AI: Response
+        else Fallback fails
+            H-->>AI: Error
+        end
+    end
+
+    AI-->>B: Final AI response or error
+    B->>DB: Save chat message
+    DB-->>B: Saved
+    B-->>F: JSON response
+    F-->>U: Show answer

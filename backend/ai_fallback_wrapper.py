@@ -187,31 +187,26 @@ class AIFallbackWrapper:
         primary_error = None
         fallback_error = None
         
-        # Try primary provider with retries unless circuit is open
+        # Try primary provider once unless circuit is open
         if self._health_tracker.can_attempt(self._primary_provider):
-            for attempt in range(settings.AI_RETRY_ATTEMPTS + 1):
-                try:
-                    client, provider = self._get_client(self._primary_provider)
-                    if client:
-                        logger.debug(f"[{provider}] Attempting {method_name} (attempt={attempt + 1})...")
-                        method = getattr(client, method_name)
-                        result = await method(*args, **kwargs)
+            try:
+                client, provider = self._get_client(self._primary_provider)
+                if client:
+                    logger.debug(f"[{provider}] Attempting {method_name} (single attempt)...")
+                    method = getattr(client, method_name)
+                    result = await method(*args, **kwargs)
 
-                        self._health_tracker.record_success(self._primary_provider)
-                        self._current_provider = self._primary_provider
-                        logger.info(f"✓ [{provider}] {method_name} succeeded")
-                        return result
-                except Exception as e:
-                    primary_error = str(e)
-                    self._health_tracker.record_failure(self._primary_provider, primary_error)
-                    is_rate_limit = self._health_tracker.is_rate_limit_error(primary_error)
-                    logger.warning(
-                        f"✗ [{self._primary_provider}] {method_name} failed on attempt {attempt + 1}: {primary_error}; "
-                        f"rate_limit={is_rate_limit}"
-                    )
-
-                    if attempt < settings.AI_RETRY_ATTEMPTS:
-                        await asyncio.sleep(settings.AI_RETRY_BASE_DELAY_SECONDS * (2 ** attempt))
+                    self._health_tracker.record_success(self._primary_provider)
+                    self._current_provider = self._primary_provider
+                    logger.info(f"✓ [{provider}] {method_name} succeeded")
+                    return result
+            except Exception as e:
+                primary_error = str(e)
+                self._health_tracker.record_failure(self._primary_provider, primary_error)
+                is_rate_limit = self._health_tracker.is_rate_limit_error(primary_error)
+                logger.warning(
+                    f"✗ [{self._primary_provider}] {method_name} failed: {primary_error}; rate_limit={is_rate_limit}"
+                )
         else:
             primary_error = (
                 f"Circuit open for {self._primary_provider}; cooldown active for "
@@ -222,33 +217,30 @@ class AIFallbackWrapper:
         # Try fallback provider
         logger.info(f"Attempting fallback to {self._fallback_provider}...")
         if self._health_tracker.can_attempt(self._fallback_provider):
-            for attempt in range(settings.AI_RETRY_ATTEMPTS + 1):
-                try:
-                    client, provider = self._get_client(self._fallback_provider)
-                    if client:
-                        self._health_tracker.record_switch(
-                            self._primary_provider,
-                            self._fallback_provider,
-                            f"Primary failed: {(primary_error or 'unknown')[:70]}"
-                        )
-
-                        logger.debug(f"[{provider}] Attempting {method_name} (fallback, attempt={attempt + 1})...")
-                        method = getattr(client, method_name)
-                        result = await method(*args, **kwargs)
-
-                        self._health_tracker.record_success(self._fallback_provider)
-                        self._current_provider = self._fallback_provider
-
-                        logger.info(f"✓ [{provider}] {method_name} succeeded (fallback)")
-                        return result
-                except Exception as e:
-                    fallback_error = str(e)
-                    self._health_tracker.record_failure(self._fallback_provider, fallback_error)
-                    logger.error(
-                        f"✗ [{self._fallback_provider}] {method_name} failed on attempt {attempt + 1}: {fallback_error}"
+            try:
+                client, provider = self._get_client(self._fallback_provider)
+                if client:
+                    self._health_tracker.record_switch(
+                        self._primary_provider,
+                        self._fallback_provider,
+                        f"Primary failed: {(primary_error or 'unknown')[:70]}"
                     )
-                    if attempt < settings.AI_RETRY_ATTEMPTS:
-                        await asyncio.sleep(settings.AI_RETRY_BASE_DELAY_SECONDS * (2 ** attempt))
+
+                    logger.debug(f"[{provider}] Attempting {method_name} (fallback single attempt)...")
+                    method = getattr(client, method_name)
+                    result = await method(*args, **kwargs)
+
+                    self._health_tracker.record_success(self._fallback_provider)
+                    self._current_provider = self._fallback_provider
+
+                    logger.info(f"✓ [{provider}] {method_name} succeeded (fallback)")
+                    return result
+            except Exception as e:
+                fallback_error = str(e)
+                self._health_tracker.record_failure(self._fallback_provider, fallback_error)
+                logger.error(
+                    f"✗ [{self._fallback_provider}] {method_name} failed: {fallback_error}"
+                )
         else:
             fallback_error = (
                 f"Circuit open for {self._fallback_provider}; cooldown active for "

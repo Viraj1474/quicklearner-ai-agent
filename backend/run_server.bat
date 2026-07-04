@@ -14,7 +14,7 @@ echo.
 
 :restart
 echo [%date% %time%] Starting server...
-C:\ai-agent\backend\venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+C:\ai-agent\.venv\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
 
 if errorlevel 1 (
     echo.

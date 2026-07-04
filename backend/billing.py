@@ -1,4 +1,25 @@
-"""Billing, plan configuration, usage tracking, and provider sync helpers."""
+"""Billing, plan configuration, usage tracking, and provider sync helpers.
+
+TEST MODE SETUP:
+When using Razorpay or Stripe for development, use their test API keys and test card numbers:
+
+Razorpay Test Mode:
+- API Key: Available from Razorpay dashboard (will start with 'rzp_test_')
+- Test Cards: https://razorpay.com/docs/payments/payments-dashboard/test-mode/
+  - Card: 4111111111111111, CVV: 123, Expiry: any future date
+- Webhook Secret: Generate from Razorpay dashboard > Settings > API Keys > Generate
+- Environment: RAZORPAY_KEY_ID=rzp_test_xxxx RAZORPAY_KEY_SECRET=xxxxx
+
+Stripe Test Mode:
+- API Key: Use sk_test_* keys from Stripe dashboard
+- Test Cards: https://stripe.com/docs/testing
+  - Card: 4242424242424242, CVV: 123, Expiry: any future date  
+- Webhook Secret: Use signing secret from Stripe dashboard > Webhooks
+- Environment: STRIPE_SECRET_KEY=sk_test_xxxx STRIPE_WEBHOOK_SECRET=whsec_xxxx
+
+IMPORTANT: Never use production API keys (sk_live_ or rzp_live_) in code or version control.
+Always use environment variables for sensitive keys.
+"""
 
 from __future__ import annotations
 
@@ -31,15 +52,17 @@ PLAN_CONFIG = {
         "yearly_price": 0,
         "badge_text": "Starter",
         "features": [
-            "Basic AI chat",
-            "Core summaries/quizzes/flashcards",
+            "20 AI chats per day",
+            "Text summarization",
+            "Notes highlighting",
             "Daily usage limits",
         ],
         "daily_limits": {
-            "chat": 10,
-            "summary": 3,
-            "quiz": 3,
-            "flashcards": 10,
+            "chat": 20,
+            "summarize": 10,  # 10/day
+            "highlight": 10,  # 10/day
+            "quiz": 0,
+            "flashcards": 0,
             "planner": 0,
             "exports": 0,
         },
@@ -71,7 +94,8 @@ PLAN_CONFIG = {
         ],
         "daily_limits": {
             "chat": None,
-            "summary": None,
+            "summarize": None,
+            "highlight": None,
             "quiz": None,
             "flashcards": None,
             "planner": None,
@@ -79,7 +103,8 @@ PLAN_CONFIG = {
         },
         "monthly_limits": {
             "chat": None,
-            "summary": None,
+            "summarize": None,
+            "highlight": None,
             "quiz": None,
             "flashcards": None,
             "planner": None,
@@ -139,7 +164,8 @@ PLAN_CONFIG = {
         "features": ["Future multi-user plan"],
         "daily_limits": {
             "chat": None,
-            "summary": None,
+            "summarize": None,
+            "highlight": None,
             "quiz": None,
             "flashcards": None,
             "planner": None,
@@ -147,7 +173,8 @@ PLAN_CONFIG = {
         },
         "monthly_limits": {
             "chat": None,
-            "summary": None,
+            "summarize": None,
+            "highlight": None,
             "quiz": None,
             "flashcards": None,
             "planner": None,
@@ -157,6 +184,65 @@ PLAN_CONFIG = {
         "razorpay_price_ids": {"monthly": None, "yearly": None},
     },
 }
+
+
+def check_quota(db: Session, user: User, feature: str) -> dict:
+    """
+    Check if user has access to a feature and quota remaining.
+    Returns dict with status and details.
+    
+    Raises HTTPException with:
+    - 403 if feature not allowed for user tier
+    - 429 if daily quota exhausted
+    """
+    from fastapi import HTTPException
+    
+    # Premium users bypass all limits
+    if has_premium_access(user):
+        return {
+            "allowed": True,
+            "is_premium": True,
+            "remaining": None,
+            "limit": None
+        }
+    
+    # Get plan
+    plan_id = user.plan or PlanId.FREE.value
+    plan = get_plan(plan_id)
+    daily_limit = plan.get("daily_limits", {}).get(feature, 0)
+    
+    # Feature not allowed (limit == 0)
+    if daily_limit == 0:
+        raise HTTPException(
+            status_code=403,
+            detail=f"{feature.capitalize()} is only available with a premium subscription. Upgrade now to get unlimited access."
+        )
+    
+    # Check daily usage - read from UserUsage (same table increment_usage writes to)
+    today = datetime.utcnow().date().isoformat()
+    usage_row = db.query(UserUsage).filter(
+        UserUsage.user_id == user.id,
+        UserUsage.feature_name == feature,
+        UserUsage.usage_date == today,
+    ).first()
+
+    used = usage_row.count if usage_row else 0
+    remaining = max(daily_limit - used, 0)
+
+    # Quota exhausted
+    if used >= daily_limit:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Daily {feature} limit reached ({daily_limit}/day). Resets at midnight UTC. Upgrade to premium for unlimited access.",
+        )
+    
+    return {
+        "allowed": True,
+        "is_premium": False,
+        "remaining": remaining,
+        "limit": daily_limit,
+        "used": used
+    }
 
 
 def _format_price(price_cents: int) -> str:
@@ -656,3 +742,36 @@ def sync_subscription_state(user: User, provider_payload: dict) -> None:
         user.last_payment_at = datetime.utcnow()
 
     user.updated_at = datetime.utcnow()
+
+
+def get_quota_info(db, user: "User") -> dict:
+    """Return quota status for all features for the current user."""
+    is_premium = has_premium_access(user)
+    plan_id = user.plan or PlanId.FREE.value
+    plan = get_plan(plan_id)
+    today = datetime.utcnow().date().isoformat()
+
+    features = ["chat", "summarize", "highlight", "quiz", "flashcards"]
+    result = {}
+    for feature in features:
+        daily_limit = plan.get("daily_limits", {}).get(feature, 0)
+        if is_premium or daily_limit is None:
+            result[feature] = {"allowed": True, "unlimited": True, "used": 0, "limit": None, "remaining": None}
+            continue
+        if daily_limit == 0:
+            result[feature] = {"allowed": False, "unlimited": False, "used": 0, "limit": 0, "remaining": 0}
+            continue
+        row = db.query(UserUsage).filter(
+            UserUsage.user_id == user.id,
+            UserUsage.feature_name == feature,
+            UserUsage.usage_date == today,
+        ).first()
+        used = row.count if row else 0
+        result[feature] = {
+            "allowed": used < daily_limit,
+            "unlimited": False,
+            "used": used,
+            "limit": daily_limit,
+            "remaining": max(daily_limit - used, 0),
+        }
+    return {"is_premium": is_premium, "features": result}

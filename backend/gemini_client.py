@@ -1,36 +1,45 @@
-import google.generativeai as genai
-from typing import Optional, List, Dict
 import json
-import os
+import asyncio
+from typing import Optional, List, Dict
 from config import settings
 
-# Configure the Gemini API - Use GEMINI_API_KEY
-genai.configure(api_key=settings.GEMINI_API_KEY)
-
-# HARDCODED MODEL NAME - gemini-2.5-flash for best free-tier quota
-# Do NOT use pro models - they have lower free-tier limits
+# HARDCODED MODEL NAME - gemini-2.5-flash only
 MODEL_NAME = "gemini-2.5-flash"
-model = genai.GenerativeModel(MODEL_NAME)
 
 class GeminiClient:
     """Client for interacting with Google Gemini API"""
     
 
     def __init__(self):
-        self.model = model
+        self._client = None
         self.chat_session = None
+
+    def _get_client(self):
+        if self._client is None:
+            if not settings.GEMINI_API_KEY:
+                raise RuntimeError("GEMINI_API_KEY is not configured")
+            from google import genai
+            self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        return self._client
     
     async def generate_text(self, prompt: str, max_tokens: int = 2000) -> str:
         """Generate text from a prompt"""
         try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    max_output_tokens=max_tokens,
-                    temperature=0.7,
+            client = self._get_client()
+
+            def _sync_call():
+                from google.genai import types
+                response = client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=max_tokens,
+                        temperature=0.7,
+                    )
                 )
-            )
-            return response.text
+                return response.text
+
+            return await asyncio.to_thread(_sync_call)
         except Exception as e:
             print(f"Error generating text: {e}")
             return f"Error: Unable to generate response. {str(e)}"

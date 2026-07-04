@@ -1,0 +1,66 @@
+classDiagram
+    class User {
+      +id
+      +name
+      +email
+      +is_premium
+      +created_at
+    }
+
+    class ChatSession {
+      +id
+      +user_id
+      +title
+      +created_at
+    }
+
+    class ChatMessage {
+      +id
+      +session_id
+      +role
+      +content
+      +created_at
+    }
+
+    class Note {
+      +id
+      +user_id
+      +title
+      +content
+      +created_at
+    }
+
+    class Subscription {
+      +id
+      +user_id
+      +plan
+      +status
+      +active_until
+    }
+
+    class AIService {
+      +chat()
+      +summarize()
+      +generateQuiz()
+    }
+
+    class AIFallbackWrapper {
+      +tryPrimary()
+      +tryFallback()
+    }
+
+    class GeminiProvider {
+      +generate()
+    }
+
+    class HuggingFaceProvider {
+      +generate()
+    }
+
+    User "1" --> "many" ChatSession
+    ChatSession "1" --> "many" ChatMessage
+    User "1" --> "many" Note
+    User "1" --> "1" Subscription
+    AIService --> AIFallbackWrapper
+    AIFallbackWrapper --> GeminiProvider
+    AIFallbackWrapper --> HuggingFaceProvider

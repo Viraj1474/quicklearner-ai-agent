@@ -6,8 +6,7 @@ Write-Host ""
 
 $backendPath = "C:\ai-agent\backend"
 $pythonCandidates = @(
-    "C:\ai-agent\.venv\Scripts\python.exe",
-    "$backendPath\venv\Scripts\python.exe"
+    "C:\ai-agent\.venv\Scripts\python.exe"
 )
 $pythonExe = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 $launcher = "$backendPath\run_backend_simple.py"
@@ -21,7 +20,7 @@ if ($existingProcess) {
 }
 
 if (-not $pythonExe) {
-    Write-Host "[-] Python virtualenv not found in expected locations:" -ForegroundColor Red
+    Write-Host "[-] Python virtualenv not found at the root .venv:" -ForegroundColor Red
     $pythonCandidates | ForEach-Object { Write-Host "    - $_" -ForegroundColor DarkGray }
     Write-Host "[*] Please run: cd C:\ai-agent; python -m venv .venv" -ForegroundColor Yellow
     exit 1

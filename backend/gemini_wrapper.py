@@ -2,7 +2,7 @@
 Centralized wrapper for Google Gemini API calls with timeout, error handling, and logging.
 Ensures all AI requests are safe, timeout-protected, and return user-friendly errors.
 
-IMPORTANT: Uses gemini-2.5-flash model for best free-tier quota.
+IMPORTANT: Uses gemini-2.5-flash model.
 API calls are rate-limited to 1 request per second minimum.
 No auto-retry logic - single call per user action.
 """
@@ -10,7 +10,6 @@ import asyncio
 import logging
 import json
 import time
-import os
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -19,8 +18,8 @@ from config import settings
 # Configure logging
 logger = logging.getLogger("gemini_wrapper")
 
-# Model name is read from GEMINI_MODEL env var (default: gemini-2.5-flash)
-MODEL_NAME = settings.GEMINI_MODEL
+# Hardcoded model name - do not override via env or config
+MODEL_NAME = "gemini-2.5-flash"
 
 # Rate limiting: minimum seconds between API calls
 MIN_CALL_INTERVAL_SECONDS = 1.0
@@ -37,7 +36,6 @@ class GeminiWrapper:
     """Wrapper for safe, timeout-protected Gemini API calls
     
     Features:
-    - Model configurable via GEMINI_MODEL env var (default: gemini-2.5-flash)
     - Lazy initialization (client created on first use, not at import)
     - Rate limiting (minimum 1 second between calls)
     - No auto-retry (single call per user action)
@@ -80,14 +78,14 @@ class GeminiWrapper:
                 )
         return self._client
     
-    def _enforce_rate_limit(self):
+    async def _enforce_rate_limit(self):
         """Enforce minimum delay between API calls"""
         now = time.time()
         elapsed = now - self._last_call_time
         if elapsed < MIN_CALL_INTERVAL_SECONDS:
             wait_time = MIN_CALL_INTERVAL_SECONDS - elapsed
             logger.debug(f"Rate limiting: waiting {wait_time:.2f}s")
-            time.sleep(wait_time)
+            await asyncio.to_thread(time.sleep, wait_time)
         self._last_call_time = time.time()
     
     def validate_api_key(self) -> bool:
@@ -138,7 +136,7 @@ class GeminiWrapper:
             )
         
         # Enforce rate limiting
-        self._enforce_rate_limit()
+        await self._enforce_rate_limit()
         
         # Increment call counter and log
         self._call_count += 1
@@ -148,14 +146,11 @@ class GeminiWrapper:
             # Get client (lazy initialization)
             client = self._get_client()
             
-            # Run Gemini call in executor with timeout
-            loop = asyncio.get_event_loop()
-            
             def _sync_call():
                 """Synchronous wrapper for Gemini call using new SDK - NO RETRY"""
                 from google.genai import types
                 response = client.models.generate_content(
-                    model=MODEL_NAME,  # Configured via GEMINI_MODEL env var
+                    model=MODEL_NAME,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         max_output_tokens=max_tokens,
@@ -166,7 +161,7 @@ class GeminiWrapper:
             
             # Execute with timeout - SINGLE CALL, NO RETRY
             response_text = await asyncio.wait_for(
-                loop.run_in_executor(None, _sync_call),
+                asyncio.to_thread(_sync_call),
                 timeout=self.TIMEOUT_SECONDS
             )
             

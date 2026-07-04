@@ -423,6 +423,22 @@ async def verify_razorpay_payment(
 @router.post("/webhook", response_model=StripeWebhookResponse)
 @router.post("/webhook/stripe", response_model=StripeWebhookResponse)
 async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Stripe webhook handler with signature verification.
+    
+    Security: CRITICAL
+    - Verifies webhook signature using Stripe's signing secret
+    - Prevents replay attacks and unauthorized webhook calls
+    - Only processes events if signature is valid
+    
+    Setup:
+    1. Get STRIPE_WEBHOOK_SECRET from Stripe Dashboard > Developers > Webhooks
+    2. Set environment variable: export STRIPE_WEBHOOK_SECRET='whsec_...'
+    3. Configure Stripe dashboard to send events to: https://yourdomain.com/api/billing/webhook/stripe
+    
+    Stripe signature verification is automatic via stripe.Webhook.construct_event()
+    which validates the webhook was sent by Stripe using the shared secret.
+    """
     try:
         import stripe
     except ImportError as exc:
@@ -515,6 +531,25 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/webhook/razorpay", response_model=StripeWebhookResponse)
 async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Razorpay webhook handler with HMAC-SHA256 signature verification.
+    
+    Security: CRITICAL
+    - Verifies webhook signature using HMAC-SHA256
+    - Computes expected HMAC from request body and webhook secret
+    - Prevents replay attacks and unauthorized webhook calls
+    - Only processes events if signature matches
+    
+    Setup:
+    1. Get RAZORPAY_WEBHOOK_SECRET from Razorpay Dashboard > Settings > API Keys
+    2. Set environment variable: export RAZORPAY_WEBHOOK_SECRET='<your-webhook-secret>'
+    3. Configure Razorpay dashboard to send webhooks to: https://yourdomain.com/api/billing/webhook/razorpay
+    
+    Signature verification:
+    - Expected signature = HMAC-SHA256(request_body, webhook_secret)
+    - Received in X-Razorpay-Signature header
+    - Uses time-safe comparison (hmac.compare_digest) to prevent timing attacks
+    """
     try:
         payload = await request.body()
         data = json.loads(payload.decode("utf-8"))

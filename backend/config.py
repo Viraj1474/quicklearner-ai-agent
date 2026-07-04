@@ -1,6 +1,8 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 import logging
+from logging.handlers import RotatingFileHandler
 
 # Load environment variables
 load_dotenv()
@@ -8,8 +10,8 @@ load_dotenv()
 class Settings:
     """Application settings and configuration"""
     
-    # API Keys - Use GEMINI_API_KEY (not GOOGLE_API_KEY)
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+    # API Keys - Use GEMINI_API_KEY only
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     
     # Hugging Face API Key
     HUGGINGFACE_API_KEY: str = os.getenv("HUGGINGFACE_API_KEY", "")
@@ -18,13 +20,26 @@ class Settings:
     AI_PROVIDER: str = os.getenv("AI_PROVIDER", "gemini")
     # AI Fallback Provider (used if primary fails): "gemini" or "huggingface"
     AI_FALLBACK_PROVIDER: str = os.getenv("AI_FALLBACK_PROVIDER", "huggingface")
-    # Gemini model name (e.g. gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-pro)
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     # Hugging Face model name (e.g. Qwen/Qwen2.5-72B-Instruct, meta-llama/Llama-3.3-70B-Instruct)
     HUGGINGFACE_MODEL: str = os.getenv("HUGGINGFACE_MODEL", "Qwen/Qwen2.5-72B-Instruct")
     
     # Database
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./ai_agent.db")
+    # Using SQLite for simplicity; this is suitable for development and small deployments.
+    # IMPORTANT: For production with concurrent users, PostgreSQL is strongly recommended.
+    # SQLite limitations:
+    #   - Single-writer limitation (only one process can write at a time)
+    #   - Limited concurrent access (read-heavy workloads better than write-heavy)
+    #   - No built-in horizontal scaling
+    # To migrate to PostgreSQL:
+    #   1. Update DATABASE_URL: postgresql://user:password@host:5432/dbname
+    #   2. Install: pip install psycopg2-binary
+    #   3. Run migrations: alembic upgrade head
+    BACKEND_DIR: Path = Path(__file__).resolve().parent
+    DEFAULT_SQLITE_DB_PATH: Path = BACKEND_DIR / "ai_agent.db"
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL",
+        f"sqlite:///{DEFAULT_SQLITE_DB_PATH.as_posix()}"
+    )
     
     # Server
     HOST: str = os.getenv("HOST", "0.0.0.0")
@@ -39,18 +54,33 @@ class Settings:
     ).split(",")
     
     # Security & JWT
+    # In production, SECRET_KEY MUST be set via environment variable (no weak defaults allowed)
     SECRET_KEY: str = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production-use-64-chars-random-string")
     ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", 7))
     PASSWORD_RESET_TOKEN_EXPIRE_HOURS: int = int(os.getenv("PASSWORD_RESET_TOKEN_EXPIRE_HOURS", 24))
 
-    # Developer access
-    ALLOWED_DEVELOPER_EMAILS: list = [
-        email.strip().lower()
-        for email in os.getenv("ALLOWED_DEVELOPER_EMAILS", "virajkulye1474@gmail.com").split(",")
-        if email.strip()
-    ]
+    # Developer access - In production, must be explicitly configured via environment
+    # In development, defaults to test email for convenience
+    _allowed_dev_emails = os.getenv("ALLOWED_DEVELOPER_EMAILS", "")
+    if _allowed_dev_emails:
+        # Explicitly configured via environment
+        ALLOWED_DEVELOPER_EMAILS: list = [
+            email.strip().lower()
+            for email in _allowed_dev_emails.split(",")
+            if email.strip()
+        ]
+    elif os.getenv("ENVIRONMENT", "development") == "development":
+        # Development mode - use default for convenience
+        ALLOWED_DEVELOPER_EMAILS: list = [
+            email.strip().lower()
+            for email in "virajkulye1474@gmail.com".split(",")
+            if email.strip()
+        ]
+    else:
+        # Production without explicit config - empty list
+        ALLOWED_DEVELOPER_EMAILS: list = []
     
     # Google OAuth Configuration
     GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -130,15 +160,54 @@ class Settings:
 
 settings = Settings()
 
+# ===== PRODUCTION VALIDATION =====
+def _validate_production_settings():
+    """Validate critical security settings when running in production.
+    
+    This function is called immediately at module load time to prevent
+    deployment misconfigurations that could expose security risks.
+    """
+    if settings.ENVIRONMENT == "production":
+        # Ensure SECRET_KEY is not using default/weak value
+        if not settings.SECRET_KEY or settings.SECRET_KEY.startswith("dev-"):
+            raise RuntimeError(
+                "FATAL: SECRET_KEY must be set to a strong random string in production. "
+                "Generate via: python -c 'import secrets; print(secrets.token_urlsafe(64))' "
+                "Set via: export SECRET_KEY='<your-strong-secret-key>'"
+            )
+        
+        # Ensure ALLOWED_DEVELOPER_EMAILS is explicitly configured
+        if not settings.ALLOWED_DEVELOPER_EMAILS:
+            raise RuntimeError(
+                "FATAL: ALLOWED_DEVELOPER_EMAILS must be explicitly set in production. "
+                "Set via: export ALLOWED_DEVELOPER_EMAILS='email1@domain.com,email2@domain.com'"
+            )
+        
+        # Ensure DEBUG is False
+        if settings.DEBUG:
+            raise RuntimeError(
+                "FATAL: DEBUG must be False in production. "
+                "Set via: export DEBUG='False'"
+            )
+
+# Run validation immediately when settings are loaded
+try:
+    _validate_production_settings()
+except RuntimeError as e:
+    logger = logging.getLogger(__name__)
+    logger.critical(str(e))
+    raise
+
 # Configure logging for application
 def setup_logging():
     """Initialize logging configuration"""
+    log_file = Path(__file__).resolve().parent / "backend.log"
     logging.basicConfig(
         level=getattr(logging, settings.LOG_LEVEL.upper()),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler('backend.log', encoding='utf-8')
+            RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding='utf-8')
         ]
     )
     # Silence noisy third-party loggers

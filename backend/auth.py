@@ -310,22 +310,21 @@ def require_premium():
     return premium_checker
 
 
-def require_premium_or_quota(usage_scope: str):
+def require_premium_or_quota(feature: str):
     """
-    Backward-compatible alias for premium-only routes.
-
-    Free users do not consume quota on premium endpoints; they receive 403.
+    Feature-based access control: 
+    - Premium users get all features with unlimited quota
+    - Free users get limited features with daily quotas
+    - Returns 403 if feature is locked for tier
+    - Returns 429 if daily quota is exhausted
     """
     async def quota_checker(
         user: User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ) -> User:
-        if has_premium_access(user):
-            return user
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Premium subscription required",
-        )
+        from billing import check_quota
+        check_quota(db, user, feature)  # Raises HTTPException on 403/429
+        return user
 
     return quota_checker
 

@@ -197,6 +197,19 @@ class RefreshToken(Base):
     user = relationship("User", back_populates="refresh_tokens")
 
 
+class LoginAttempt(Base):
+    """Persistent brute-force protection state for login attempts."""
+    __tablename__ = "login_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    attempt_key = Column(String(255), unique=True, index=True, nullable=False)
+    attempts = Column(Integer, default=0)
+    last_attempt_time = Column(DateTime, nullable=True)
+    lock_until = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class UsageQuota(Base):
     """Track per-user daily premium usage for free-tier limits."""
     __tablename__ = "usage_quotas"

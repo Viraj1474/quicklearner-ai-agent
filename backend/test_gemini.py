@@ -24,7 +24,7 @@ def test_gemini_single_request():
     """Send exactly ONE request to Gemini API and print result"""
     
     # Get API key from environment
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
     
     if not api_key:
         print("❌ ERROR: GEMINI_API_KEY not found in environment")
